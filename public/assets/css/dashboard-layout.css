@@ -1,0 +1,303 @@
+/* ==========================================================================
+   PROFESSIONAL ESPORTS DASHBOARD LAYOUT (Zero-Lag, Hidden Sidebar by Default)
+   ========================================================================== */
+:root {
+    --dash-sidebar-width: 260px;
+    --dash-topbar-height: 56px;
+
+    --dash-bg-main: #070d14;
+    --dash-bg-sidebar: #0b1320;
+    --dash-bg-topbar: #0b1320;
+
+    --dash-border: #1e3550;
+    --dash-border-strong: #2f4e73;
+
+    --dash-text-main: #f8fafc;
+    --dash-text-muted: #94a3b8;
+
+    --dash-primary: #2563eb;
+    --dash-primary-hover: #1d4ed8;
+
+    --dash-sidebar-hover: #142233;
+    --dash-sidebar-active: #1a2c42;
+}
+
+body.new-dashboard-theme {
+    margin: 0;
+    padding: 0;
+    background-color: var(--dash-bg-main);
+    color: var(--dash-text-main);
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    overflow-x: hidden;
+}
+
+/* Matikan margin-left bawaan class lama has-global-cms agar tidak bentrok */
+body.new-dashboard-theme.has-global-cms .app-main,
+body.new-dashboard-theme.has-global-cms .app-footer,
+body.new-dashboard-theme.has-global-cms .navbar .container,
+body.new-dashboard-theme.has-global-cms .navbar .container-fluid {
+    margin-left: 0 !important;
+    padding-left: 1rem !important;
+}
+
+/* Base Wrapper */
+.dashboard-wrapper {
+    display: flex;
+    min-height: 100vh;
+    width: 100%;
+    position: relative;
+}
+
+/* ==========================================================================
+   SIDEBAR: DEFAULT TERTUTUP (OFF-CANVAS) & TANPA ANIMASI BOCOR SAAT RELOAD
+   ========================================================================== */
+.dashboard-sidebar {
+    width: var(--dash-sidebar-width);
+    background-color: var(--dash-bg-sidebar);
+    border-right: 1px solid var(--dash-border-strong);
+    display: flex;
+    flex-direction: column;
+    position: fixed;
+    top: 0;
+    left: 0;
+    height: 100vh;
+    z-index: 1050;
+    /* Default: Tertutup di sebelah kiri layar */
+    transform: translateX(-100%);
+    box-shadow: none;
+    /* Transisi hanya aktif setelah user klik tombol (bukan saat page load) */
+    transition: transform 0.16s cubic-bezier(0.4, 0, 0.2, 1);
+    will-change: transform;
+}
+
+/* Sidebar hanya muncul jika dibuka (.is-open) */
+.dashboard-sidebar.is-open,
+body.sidebar-open .dashboard-sidebar {
+    transform: translateX(0);
+    box-shadow: 16px 0 40px rgba(0, 0, 0, 0.65);
+}
+
+/* Header Brand di dalam Sidebar */
+.sidebar-brand {
+    height: var(--dash-topbar-height);
+    border-bottom: 1px solid var(--dash-border);
+    display: flex;
+    align-items: center;
+    padding: 0 1rem;
+    gap: 0.65rem;
+    background: #080f1a;
+    flex-shrink: 0;
+}
+
+.brand-logo {
+    background-color: var(--dash-primary);
+    color: #ffffff;
+    font-weight: 900;
+    font-size: 0.85rem;
+    padding: 0.3rem 0.5rem;
+    border-radius: 0 !important;
+    letter-spacing: 0.06em;
+    line-height: 1;
+    flex-shrink: 0;
+    border: 1px solid #60a5fa;
+}
+
+.brand-text {
+    font-weight: 800;
+    font-size: 0.85rem;
+    color: var(--dash-text-main);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* Navigasi Link di Sidebar */
+.sidebar-nav {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0.85rem 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.nav-group-title {
+    padding: 0.5rem 1.15rem 0.35rem;
+    font-size: 0.68rem;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: #64748b;
+}
+
+.sidebar-link {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.7rem 1.15rem;
+    color: var(--dash-text-muted);
+    text-decoration: none;
+    font-weight: 600;
+    font-size: 0.85rem;
+    border-left: 3px solid transparent;
+    transition: none !important; /* Instan, tajam, tanpa delay */
+}
+
+.sidebar-link:hover {
+    background-color: var(--dash-sidebar-hover);
+    color: #ffffff;
+    border-left-color: #475569;
+}
+
+.sidebar-link.active {
+    background-color: var(--dash-sidebar-active);
+    color: #ffffff;
+    font-weight: 700;
+    border-left-color: #38bdf8;
+}
+
+/* ==========================================================================
+   CONTENT AREA: 100% FULL WIDTH (TIDAK BERGESER-GESER SAAT RELOAD)
+   ========================================================================== */
+.dashboard-content-wrapper {
+    flex: 1;
+    margin-left: 0 !important; /* Selalu 0 agar tidak pernah terjadi bug animasi geser saat reload */
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+    min-width: 0;
+    width: 100%;
+    transition: none !important; /* Matikan transisi margin penyebab lag animasi CRUD */
+}
+
+/* ==========================================================================
+   TOPBAR PROFESIONAL & BURGER MENU TEGAS
+   ========================================================================== */
+.dashboard-topbar {
+    height: var(--dash-topbar-height);
+    background-color: var(--dash-bg-topbar);
+    border-bottom: 1px solid var(--dash-border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 1.25rem;
+    position: sticky;
+    top: 0;
+    z-index: 1020;
+}
+
+.topbar-left,
+.topbar-right {
+    display: flex;
+    align-items: center;
+    gap: 0.85rem;
+}
+
+/* Tombol Burger dibuat kotak tegas bergaya Utilitarian */
+.btn-hamburger {
+    width: 36px;
+    height: 36px;
+    background: #142233;
+    border: 1px solid var(--dash-border-strong);
+    color: var(--dash-text-main);
+    cursor: pointer;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 0 !important;
+    transition: none !important;
+}
+
+.btn-hamburger:hover {
+    background: var(--dash-primary);
+    border-color: #60a5fa;
+    color: #ffffff;
+}
+
+.topbar-page-title {
+    margin: 0;
+    font-size: 0.98rem;
+    font-weight: 800;
+    color: var(--dash-text-main);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding-left: 0.85rem;
+    border-left: 2px solid var(--dash-border-strong);
+    line-height: 1.2;
+}
+
+/* Info User & Tombol Logout di Kanan Topbar */
+.topbar-user-info {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    line-height: 1.15;
+    padding-right: 0.5rem;
+    border-right: 1px solid var(--dash-border);
+}
+
+.user-name {
+    font-size: 0.8rem;
+    font-weight: 800;
+    color: #f8fafc;
+    letter-spacing: 0.02em;
+}
+
+.user-role {
+    font-size: 0.68rem;
+    font-weight: 700;
+    color: #38bdf8;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.btn-logout {
+    background-color: #142233;
+    border: 1px solid var(--dash-border-strong);
+    color: #cbd5e1;
+    padding: 0.42rem 0.9rem;
+    font-size: 0.75rem;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    text-decoration: none;
+    cursor: pointer;
+    border-radius: 0 !important;
+    transition: none !important;
+}
+
+.btn-logout:hover {
+    background-color: #b91c1c;
+    border-color: #ef4444;
+    color: #ffffff;
+}
+
+/* Main Content Area */
+.dashboard-main-content {
+    flex: 1;
+    padding: 1.5rem;
+    width: 100%;
+    box-sizing: border-box;
+    display: block;
+}
+
+/* Overlay Gelap Saat Sidebar Dibuka */
+.sidebar-overlay {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    background: rgba(3, 7, 14, 0.65);
+    backdrop-filter: blur(2px);
+    z-index: 1040;
+}
+
+.sidebar-overlay.is-open,
+body.sidebar-open .sidebar-overlay {
+    display: block;
+}

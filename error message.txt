@@ -1,0 +1,262 @@
+Displayed at 14:21:01 — PHP: 8.2.35 — CodeIgniter: 4.7.3 -- Environment: development
+CodeIgniter\Database\Exceptions\DatabaseException #1062
+Duplicate entry '0' for key 'pots.PRIMARY'
+
+SYSTEMPATH/Database/BaseConnection.php at line 863
+
+856                     }
+857                 }
+858 
+859                 // Let others do something with this query.
+860                 Events::trigger('DBQuery', $query);
+861 
+862                 if ($exception instanceof DatabaseException) {
+863                     throw new DatabaseException(
+864                         $exception->getMessage(),
+865                         $exception->getCode(),
+866                         $exception,
+867                     );
+868                 }
+869 
+870                 return false;
+    Caused by:
+    CodeIgniter\Database\Exceptions\DatabaseException #1062
+    Duplicate entry '0' for key 'pots.PRIMARY'    search →
+    SYSTEMPATH/Database/MySQLi/Connection.php:310    
+    Caused by:
+    mysqli_sql_exception #1062
+    Duplicate entry '0' for key 'pots.PRIMARY'    search →
+    SYSTEMPATH/Database/MySQLi/Connection.php:300    
+Backtrace Server Request Response Files Memory
+SYSTEMPATH/Database/MySQLi/Connection.php : 300   —  mysqli->query ( arguments )
+
+293             $this->connID->next_result();
+294             if ($res = $this->connID->store_result()) {
+295                 $res->free();
+296             }
+297         }
+298 
+299         try {
+300             return $this->connID->query($this->prepQuery($sql), $this->resultMode);
+301         } catch (mysqli_sql_exception $e) {
+302             log_message('error', "{message}\nin {exFile} on line {exLine}.\n{trace}", [
+303                 'message' => $e->getMessage(),
+304                 'exFile'  => clean_path($e->getFile()),
+305                 'exLine'  => $e->getLine(),
+306                 'trace'   => render_backtrace($e->getTrace()),
+307             ]);
+SYSTEMPATH/Database/BaseConnection.php : 908   —  CodeIgniter\Database\MySQLi\Connection->execute ( arguments )
+
+901      */
+902     public function simpleQuery(string $sql)
+903     {
+904         if (empty($this->connID)) {
+905             $this->initialize();
+906         }
+907 
+908         return $this->execute($sql);
+909     }
+910 
+911     /**
+912      * Disable Transactions
+913      *
+914      * This permits transactions to be disabled at run-time.
+915      *
+SYSTEMPATH/Database/BaseConnection.php : 825   —  CodeIgniter\Database\BaseConnection->simpleQuery ( arguments )
+
+818 
+819             return $query;
+820         }
+821 
+822         // Run the query for real
+823         try {
+824             $exception      = null;
+825             $this->resultID = $this->simpleQuery($query->getQuery());
+826         } catch (DatabaseException $exception) {
+827             $this->resultID = false;
+828         }
+829 
+830         if ($this->resultID === false) {
+831             $query->setDuration($startTime, $startTime);
+832 
+SYSTEMPATH/Database/BaseBuilder.php : 2343   —  CodeIgniter\Database\BaseConnection->query ( arguments )
+
+2336             array_keys($this->QBSet),
+2337             array_values($this->QBSet),
+2338         );
+2339 
+2340         if (! $this->testMode) {
+2341             $this->resetWrite();
+2342 
+2343             $result = $this->db->query($sql, $this->binds, false);
+2344 
+2345             // Clear our binds so we don't eat up memory
+2346             $this->binds = [];
+2347 
+2348             return $result;
+2349         }
+2350 
+SYSTEMPATH/Model.php : 357   —  CodeIgniter\Database\BaseBuilder->insert ()
+
+350                 );
+351             } else {
+352                 $sql = 'INSERT INTO ' . $table . ' DEFAULT VALUES';
+353             }
+354 
+355             $result = $this->db->query($sql);
+356         } else {
+357             $result = $builder->insert();
+358         }
+359 
+360         // If insertion succeeded then save the insert ID
+361         if ($result) {
+362             $this->insertID = $this->useAutoIncrement ? $this->db->insertID() : $row[$this->primaryKey];
+363         }
+364 
+SYSTEMPATH/BaseModel.php : 899   —  CodeIgniter\Model->doInsert ( arguments )
+
+892 
+893         $eventData = ['data' => $row];
+894 
+895         if ($this->tempAllowCallbacks) {
+896             $eventData = $this->trigger('beforeInsert', $eventData);
+897         }
+898 
+899         $result = $this->doInsert($eventData['data']);
+900 
+901         $eventData = [
+902             'id'     => $this->insertID,
+903             'data'   => $eventData['data'],
+904             'result' => $result,
+905         ];
+906 
+SYSTEMPATH/Model.php : 670   —  CodeIgniter\BaseModel->insert ( arguments )
+
+663                 $row = array_merge($this->tempData['data'], $row);
+664             }
+665         }
+666 
+667         $this->escape   = $this->tempData['escape'] ?? [];
+668         $this->tempData = [];
+669 
+670         return parent::insert($row, $returnID);
+671     }
+672 
+673     protected function doProtectFieldsForInsert(array $row): array
+674     {
+675         if (! $this->protectFields) {
+676             return $row;
+677         }
+APPPATH/Controllers/PotController.php : 97   —  CodeIgniter\Model->insert ( arguments )
+
+ 90         $stage = trim((string) ($data['stage'] ?? 'kualifikasi')); // DEFAULT STAGE
+ 91 
+ 92         if ($name === '') {
+ 93             $name = 'POT ' . ($existingCount + 1);
+ 94         }
+ 95 
+ 96         // DUPLIKASI DEFAULT TURNAMEN SAAT POT BARU DIBUAT MANUAL
+ 97         $potId = (int) $this->potModel->insert([
+ 98             'tournament_id' => $tournamentId,
+ 99             'name'          => $name,
+100             'sort_order'    => $sortOrder === '' ? ($existingCount + 1) : (int) $sortOrder,
+101             'stage'         => $stage,
+102             'game_count'    => (int) ($tournament['default_game_count'] ?? 5),
+103             'max_teams'     => (int) ($tournament['max_teams_per_pot'] ?? 12),
+104         ], true);
+SYSTEMPATH/CodeIgniter.php : 974   —  App\Controllers\PotController->store ()
+
+967         // This is a Web request or PHP CLI request
+968         $params = $this->router->params();
+969 
+970         // The controller method param types may not be string.
+971         // So cannot set `declare(strict_types=1)` in this file.
+972         $output = method_exists($class, '_remap')
+973             ? $class->_remap($this->method, ...$params)
+974             : $class->{$this->method}(...$params);
+975 
+976         $this->benchmark->stop('controller');
+977 
+978         return $output;
+979     }
+980 
+981     /**
+SYSTEMPATH/CodeIgniter.php : 520   —  CodeIgniter\CodeIgniter->runController ( arguments )
+
+513             if (! method_exists($controller, '_remap') && ! is_callable([$controller, $this->method], false)) {
+514                 throw PageNotFoundException::forMethodNotFound($this->method);
+515             }
+516 
+517             // Is there a "post_controller_constructor" event?
+518             Events::trigger('post_controller_constructor');
+519 
+520             $returned = $this->runController($controller);
+521         } else {
+522             $this->benchmark->stop('controller_constructor');
+523             $this->benchmark->stop('controller');
+524         }
+525 
+526         // If $returned is a string, then the controller output something,
+527         // probably a view, instead of echoing it directly. Send it along
+SYSTEMPATH/CodeIgniter.php : 363   —  CodeIgniter\CodeIgniter->handleRequest ( arguments )
+
+356         $possibleResponse = $this->runRequiredBeforeFilters($filters);
+357 
+358         // If a ResponseInterface instance is returned then send it back to the client and stop
+359         if ($possibleResponse instanceof ResponseInterface) {
+360             $this->response = $possibleResponse;
+361         } else {
+362             try {
+363                 $this->response = $this->handleRequest($routes, config(Cache::class), $returnResponse);
+364             } catch (ResponsableInterface $e) {
+365                 $this->outputBufferingEnd();
+366 
+367                 $this->response = $e->getResponse();
+368             } catch (PageNotFoundException $e) {
+369                 $this->response = $this->display404errors($e);
+370             } catch (Throwable $e) {
+SYSTEMPATH/Boot.php : 417   —  CodeIgniter\CodeIgniter->run ()
+
+410 
+411     /**
+412      * Now that everything is set up, it's time to actually fire
+413      * up the engines and make this app do its thang.
+414      */
+415     protected static function runCodeIgniter(CodeIgniter $app): void
+416     {
+417         $app->run();
+418     }
+419 
+420     protected static function saveConfigCache(FactoriesCache $factoriesCache): void
+421     {
+422         $factoriesCache->save('config');
+423     }
+424 
+SYSTEMPATH/Boot.php : 68   —  CodeIgniter\Boot::runCodeIgniter ( arguments )
+
+61         if ($configCacheEnabled) {
+62             $factoriesCache = static::loadConfigCache();
+63         }
+64 
+65         static::autoloadHelpers();
+66 
+67         $app = static::initializeCodeIgniter();
+68         static::runCodeIgniter($app);
+69 
+70         if ($configCacheEnabled) {
+71             static::saveConfigCache($factoriesCache);
+72         }
+73 
+74         // Exits the application, setting the exit code for CLI-based
+75         // applications that might be watching.
+FCPATH/index.php : 59   —  CodeIgniter\Boot::bootWeb ( arguments )
+
+52 // ^^^ Change this line if you move your application folder
+53 
+54 $paths = new Paths();
+55 
+56 // LOAD THE FRAMEWORK BOOTSTRAP FILE
+57 require $paths->systemDirectory . '/Boot.php';
+58 
+59 exit(Boot::bootWeb($paths));
+60 
