@@ -11,6 +11,7 @@
     <link href="<?= base_url('assets/css/dark-app.css?v=' . time()) ?>" rel="stylesheet">
     <!-- NEW DASHBOARD LAYOUT CSS -->
     <link href="<?= base_url('assets/css/dashboard-layout.css?v=' . time()) ?>" rel="stylesheet">
+    <?= $this->renderSection('styles') ?>
 </head>
 <?php
 $layoutUser = auth()->user();
@@ -42,13 +43,24 @@ $hasGlobalCms = $layoutUser !== null && $layoutUser->inGroup('admin');
     <!-- MODALS -->
     <?= $this->renderSection('modals') ?>
 
-    <!-- MODALS -->
-    <?= $this->renderSection('modals') ?>
-
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
     <!-- CUKUP 2 FILE JS INTI INI SAJA (Zero Conflict) -->
     <script src="<?= base_url('assets/js/app-shell.js?v=' . time()) ?>"></script>
     <script src="<?= base_url('assets/js/score-workspace.js?v=' . time()) ?>"></script>
+
+    <!-- GLOBAL 80% COMPACT UI SCALER (ANTI-BOCOR CSS) -->
+    <script <?= function_exists('csp_script_nonce') ? csp_script_nonce() : '' ?>>
+        (function () {
+            var globalScaleStyle = document.createElement('style');
+            globalScaleStyle.textContent = [
+                'html { zoom: 0.8; }',
+                /* Kompensasi tinggi layar (100vh / 0.8 = 125vh) agar sidebar & background tetap penuh sampai bawah */
+                'body, .dashboard-wrapper, .dashboard-content-wrapper { min-height: 125vh !important; }',
+                '.dashboard-sidebar, .js-dashboard-sidebar, .js-sidebar-overlay { height: 125vh !important; min-height: 125vh !important; }'
+            ].join('\n');
+            document.head.appendChild(globalScaleStyle);
+        })();
+    </script>
 
 </body>
 

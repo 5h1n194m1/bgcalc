@@ -18,6 +18,7 @@ class TeamController extends BaseController
     private TeamMemberModel $teamMemberModel;
     private TournamentModel $tournamentModel;
     private ScoreModel $scoreModel;
+    private bool $hasSandboxCol = false;
 
     public function __construct()
     {
@@ -26,6 +27,12 @@ class TeamController extends BaseController
         $this->teamMemberModel = new TeamMemberModel();
         $this->tournamentModel = new TournamentModel();
         $this->scoreModel = new ScoreModel();
+
+        try {
+            $this->hasSandboxCol = db_connect()->fieldExists('is_sandbox', 'teams');
+        } catch (\Throwable $e) {
+            $this->hasSandboxCol = false;
+        }
     }
 
     public function index(int $potId)
@@ -33,15 +40,19 @@ class TeamController extends BaseController
         return redirect()->to(site_url('pots/' . $potId . '/scores'));
     }
 
+    /**
+     * GET /teams/roster
+     * Halaman utama Team Management Hub (Pro Spreadsheet + Smart Import Tab)
+     */
     public function rosterIndex()
     {
         $this->cleanupRosterData();
         $tournaments = $this->tournamentModel->orderBy('created_at', 'DESC')->findAll();
         $rawTournamentId = $this->request->getGet('tournament_id');
 
-        $perPage = (int) ($this->request->getGet('per_page') ?? 24);
-        if (!in_array($perPage, [24, 48, 72, 96], true)) {
-            $perPage = 24;
+        $perPage = (int) ($this->request->getGet('per_page') ?? 48);
+        if (!in_array($perPage, [24, 48, 72, 96, 200], true)) {
+            $perPage = 48;
         }
 
         if ($rawTournamentId === null) {
@@ -56,9 +67,16 @@ class TeamController extends BaseController
         $selectedTournamentId = ctype_digit($selectedTournamentKey) ? (int) $selectedTournamentKey : 0;
         $showOnlyWithoutTournament = $selectedTournamentKey === 'none';
         $showOnlyWithoutPot = $selectedTournamentKey === 'unassigned';
+        $showOnlySandbox = $selectedTournamentKey === 'sandbox';
+
+        $selectCols = 'teams.id, teams.tournament_id, teams.name, teams.sort_order, teams.pot_id, '
+            . ($this->hasSandboxCol ? 'teams.is_sandbox, ' : '0 AS is_sandbox, ')
+            . 'pots.name AS pot_name, pots.stage AS pot_stage, '
+            . 'COALESCE(pot_tournaments.name, team_tournaments.name) AS tournament_name, '
+            . 'COALESCE(pot_tournaments.status, team_tournaments.status) AS tournament_status';
 
         $teamsBuilder = $this->teamModel
-            ->select('teams.id, teams.tournament_id, teams.name, teams.sort_order, teams.pot_id, pots.name AS pot_name, pots.stage AS pot_stage, COALESCE(pot_tournaments.name, team_tournaments.name) AS tournament_name, COALESCE(pot_tournaments.status, team_tournaments.status) AS tournament_status')
+            ->select($selectCols)
             ->join('pots', 'pots.id = teams.pot_id', 'left')
             ->join('tournaments AS pot_tournaments', 'pot_tournaments.id = pots.tournament_id', 'left')
             ->join('tournaments AS team_tournaments', 'team_tournaments.id = teams.tournament_id', 'left');
@@ -71,14 +89,23 @@ class TeamController extends BaseController
                 ->where('teams.tournament_id', $selectedTournamentId)
                 ->groupEnd()
                 ->groupEnd();
+        } elseif ($showOnlySandbox && $this->hasSandboxCol) {
+            $teamsBuilder->where('teams.is_sandbox', 1);
         } elseif ($showOnlyWithoutPot) {
             $teamsBuilder->where('teams.pot_id IS NULL', null, false);
+            if ($this->hasSandboxCol) {
+                $teamsBuilder->where('teams.is_sandbox', 0);
+            }
         } elseif ($showOnlyWithoutTournament) {
             $teamsBuilder->where('teams.pot_id IS NULL', null, false)
                 ->groupStart()
                 ->where('teams.tournament_id IS NULL', null, false)
                 ->orWhere('teams.tournament_id', 0)
                 ->groupEnd();
+        }
+
+        if ($this->hasSandboxCol) {
+            $teamsBuilder->orderBy('teams.is_sandbox', 'ASC');
         }
 
         $teams = $teamsBuilder
@@ -117,19 +144,21 @@ class TeamController extends BaseController
 
         $rows = array_map(function (array $team) use ($membersByTeam, $stageLabels): array {
             $teamId = (int) $team['id'];
+            $isSandbox = (int) ($team['is_sandbox'] ?? 0) === 1;
             $members = array_values(array_filter($membersByTeam[$teamId] ?? [], static fn(string $name): bool => $name !== ''));
 
             $rawPotName = trim((string) ($team['pot_name'] ?? ''));
-            $stageKey = strtolower(trim((string) ($team['pot_stage'] ?? '')));
-            $stageTitle = $stageLabels[$stageKey] ?? ($stageKey !== '' ? ucfirst($stageKey) : '');
+            $stageKey = $isSandbox ? 'sandbox' : strtolower(trim((string) ($team['pot_stage'] ?? '')));
+            $stageTitle = $isSandbox ? 'Sandbox' : ($stageLabels[$stageKey] ?? ($stageKey !== '' ? ucfirst($stageKey) : ''));
 
-            $displayPotName = ($rawPotName !== '' && $stageTitle !== '')
-                ? '[' . $stageTitle . '] - ' . $rawPotName
-                : $rawPotName;
+            $displayPotName = $isSandbox
+                ? '[Sandbox / Recycle Bin]'
+                : (($rawPotName !== '' && $stageTitle !== '') ? '[' . $stageTitle . '] - ' . $rawPotName : $rawPotName);
 
             return [
                 'id' => $teamId,
                 'pot_id' => $team['pot_id'] !== null ? (int) $team['pot_id'] : null,
+                'is_sandbox' => $isSandbox ? 1 : 0,
                 'tournament_id' => $team['tournament_id'] !== null ? (int) $team['tournament_id'] : null,
                 'name' => (string) ($team['name'] ?? '-'),
                 'members' => $members,
@@ -139,9 +168,11 @@ class TeamController extends BaseController
                 'pot_stage' => $stageKey,
                 'stage_label' => $stageTitle,
                 'tournament_name' => trim((string) ($team['tournament_name'] ?? '')),
-                'scope_label' => $team['pot_id'] === null
-                    ? 'Tanpa Pot'
-                    : trim($displayPotName . (trim((string) ($team['tournament_name'] ?? '')) !== '' ? ' / ' . trim((string) ($team['tournament_name'] ?? '')) : '')),
+                'scope_label' => $isSandbox
+                    ? 'Sandbox / Recycle Bin'
+                    : ($team['pot_id'] === null
+                        ? 'Tanpa Pot'
+                        : trim($displayPotName . (trim((string) ($team['tournament_name'] ?? '')) !== '' ? ' / ' . trim((string) ($team['tournament_name'] ?? '')) : ''))),
                 'is_locked' => (string) ($team['tournament_status'] ?? '') === TournamentModel::STATUS_SELESAI,
             ];
         }, $teams);
@@ -173,7 +204,11 @@ class TeamController extends BaseController
                 ->orderBy('sort_order', 'ASC')
                 ->orderBy('name', 'ASC')
                 ->findAll()
-            : [];
+            : $this->potModel
+                ->orderBy('tournament_id', 'DESC')
+                ->orderBy('stage', 'ASC')
+                ->orderBy('sort_order', 'ASC')
+                ->findAll();
 
         $selectedPotId = (int) ($this->request->getGet('pot_id') ?? 0);
         $activeTab = trim((string) ($this->request->getGet('tab') ?? 'roster'));
@@ -237,9 +272,7 @@ class TeamController extends BaseController
 
     public function managerData()
     {
-        $tournaments = $this->tournamentModel
-            ->orderBy('created_at', 'DESC')
-            ->findAll();
+        $tournaments = $this->tournamentModel->orderBy('created_at', 'DESC')->findAll();
 
         $selectedTournamentId = (int) ($this->request->getGet('tournament_id') ?? 0);
         if ($selectedTournamentId <= 0 && $tournaments !== []) {
@@ -401,9 +434,6 @@ class TeamController extends BaseController
 
     /**
      * SMART POT ALLOCATOR & AUTO-OVERFLOW ENGINE
-     * - Jika user tidak mengisi pot (autoAssignIfEmpty = true), otomatis masuk ke Pot pertama yang masih muat.
-     * - Jika user memilih Pot 1 tapi Pot 1 sudah penuh, otomatis melimpah (overflow) ke Pot 2, Pot 3, dst.
-     * - Jika semua Pot penuh, otomatis membuat Pot nomor berikutnya!
      */
     private function resolveTargetPotWithAutoOverflow(
         int $tournamentId,
@@ -436,23 +466,37 @@ class TeamController extends BaseController
             $cleanName = trim($matches[1]);
         }
 
-        // Jika user secara eksplisit mengetik kata kunci unassigned / tanpa pot
         $lowerName = strtolower($cleanName);
+
+        // Jika stage atau nama pot adalah Sandbox / Recycle Bin
+        if ($stage === 'sandbox' || in_array($lowerName, ['sandbox', 'recycle bin', 'trash', 'cadangan', 'parkir'], true)) {
+            return [
+                'ok' => true,
+                'pot_id' => null,
+                'is_sandbox' => 1,
+                'pot' => null,
+                'tournament_id' => $tournamentId,
+                'overflow_note' => 'Dipindahkan ke Sandbox / Recycle Bin.',
+            ];
+        }
+
+        // Jika eksplisit Unassigned / Tanpa Pot
         if (in_array($lowerName, ['unassigned', 'none', 'tanpa pot', '-', '0', 'kosong'], true)) {
             return [
                 'ok' => true,
                 'pot_id' => null,
+                'is_sandbox' => 0,
                 'pot' => null,
                 'tournament_id' => $tournamentId,
                 'overflow_note' => '',
             ];
         }
 
-        // Jika kosong dan mode tidak memaksa auto-assign (misal saat edit tim yang memang unassigned)
         if ($requestedPotId === null && $cleanName === '' && !$autoAssignIfEmpty) {
             return [
                 'ok' => true,
                 'pot_id' => null,
+                'is_sandbox' => 0,
                 'pot' => null,
                 'tournament_id' => $tournamentId,
                 'overflow_note' => '',
@@ -462,7 +506,6 @@ class TeamController extends BaseController
         $defaultMaxTeams = max(1, (int) ($tournament['max_teams_per_pot'] ?? 12));
         $defaultGameCount = max(1, (int) ($tournament['default_game_count'] ?? 5));
 
-        // 1. Cari kandidat Pot awal yang diminta user
         $candidatePot = null;
         if ($requestedPotId !== null && $requestedPotId > 0) {
             $found = $this->potModel->find($requestedPotId);
@@ -487,7 +530,6 @@ class TeamController extends BaseController
                 }
             }
 
-            // Jika nama pot yang diketik spesifik dan belum ada sama sekali, langsung buatkan pot tersebut
             if ($candidatePot === null) {
                 $lastPot = $this->potModel
                     ->where('tournament_id', $tournamentId)
@@ -511,6 +553,7 @@ class TeamController extends BaseController
                 return [
                     'ok' => true,
                     'pot_id' => $newPotId,
+                    'is_sandbox' => 0,
                     'pot' => $createdPot,
                     'tournament_id' => $tournamentId,
                     'overflow_note' => "Pot baru '{$cleanName}' otomatis dibuat.",
@@ -518,7 +561,6 @@ class TeamController extends BaseController
             }
         }
 
-        // 2. Ambil semua pot pada turnamen & tahapan (stage) ini secara berurutan (Pot 1, Pot 2, dst.)
         $stagePots = $this->potModel
             ->where('tournament_id', $tournamentId)
             ->where('stage', $stage)
@@ -526,7 +568,6 @@ class TeamController extends BaseController
             ->orderBy('id', 'ASC')
             ->findAll();
 
-        // Jika belum ada 1 pun pot di turnamen/stage ini, otomatis buat POT 1!
         if ($stagePots === []) {
             $firstPotName = $cleanName !== '' ? $cleanName : 'POT 1';
             $newPotId = (int) $this->potModel->insert([
@@ -544,36 +585,38 @@ class TeamController extends BaseController
             return [
                 'ok' => true,
                 'pot_id' => $newPotId,
+                'is_sandbox' => 0,
                 'pot' => $createdPot,
                 'tournament_id' => $tournamentId,
                 'overflow_note' => "Otomatis membuat dan memasukkan ke {$firstPotName}.",
             ];
         }
 
-        // Helper untuk mengecek apakah sebuah pot masih punya kursi kosong
         $hasCapacity = function (array $potRow) use ($defaultMaxTeams, $excludeTeamId): bool {
             $max = (int) ($potRow['max_teams'] ?? 0) > 0 ? (int) $potRow['max_teams'] : $defaultMaxTeams;
             $builder = $this->teamModel->where('pot_id', (int) $potRow['id']);
+            if ($this->hasSandboxCol) {
+                $builder->where('is_sandbox', 0);
+            }
             if ($excludeTeamId !== null && $excludeTeamId > 0) {
                 $builder->where('id !=', $excludeTeamId);
             }
             return $builder->countAllResults() < $max;
         };
 
-        // 3. Jika ada candidatePot (misal user pilih POT 1), cek apakah POT 1 masih muat
         $startIndex = 0;
         if ($candidatePot !== null) {
             if ($hasCapacity($candidatePot)) {
                 return [
                     'ok' => true,
                     'pot_id' => (int) $candidatePot['id'],
+                    'is_sandbox' => 0,
                     'pot' => $candidatePot,
                     'tournament_id' => $tournamentId,
                     'overflow_note' => '',
                 ];
             }
 
-            // Jika POT 1 penuh, cari indeks POT 1 agar kita bisa mengecek POT 2, POT 3, dst. setelahnya
             foreach ($stagePots as $idx => $sp) {
                 if ((int) $sp['id'] === (int) $candidatePot['id']) {
                     $startIndex = $idx + 1;
@@ -582,17 +625,17 @@ class TeamController extends BaseController
             }
         }
 
-        // 4. Cari pot mulai dari $startIndex (Pot selanjutnya) yang masih belum penuh
         for ($i = $startIndex, $total = count($stagePots); $i < $total; $i++) {
             if ($hasCapacity($stagePots[$i])) {
                 $chosenPot = $stagePots[$i];
                 $note = $candidatePot !== null
-                    ? "Pot '{$candidatePot['name']}' sudah penuh, otomatis dialihkan ke '{$chosenPot['name']}'."
+                    ? "Pot '{$candidatePot['name']}' penuh, dialihkan ke '{$chosenPot['name']}'."
                     : "Otomatis ditempatkan ke '{$chosenPot['name']}'.";
 
                 return [
                     'ok' => true,
                     'pot_id' => (int) $chosenPot['id'],
+                    'is_sandbox' => 0,
                     'pot' => $chosenPot,
                     'tournament_id' => $tournamentId,
                     'overflow_note' => $note,
@@ -600,21 +643,20 @@ class TeamController extends BaseController
             }
         }
 
-        // Fallback: Cek juga kalau ada pot sebelum $startIndex yang masih kosong
         for ($i = 0; $i < $startIndex; $i++) {
             if ($hasCapacity($stagePots[$i])) {
                 $chosenPot = $stagePots[$i];
                 return [
                     'ok' => true,
                     'pot_id' => (int) $chosenPot['id'],
+                    'is_sandbox' => 0,
                     'pot' => $chosenPot,
                     'tournament_id' => $tournamentId,
-                    'overflow_note' => "Pot '{$candidatePot['name']}' penuh, otomatis dialihkan ke '{$chosenPot['name']}'.",
+                    'overflow_note' => "Pot '{$candidatePot['name']}' penuh, dialihkan ke '{$chosenPot['name']}'.",
                 ];
             }
         }
 
-        // 5. Jika SEMUA Pot yang ada sudah penuh (misal Pot 1 penuh, Pot 2 penuh), otomatis buat Pot nomor berikutnya!
         $nextNumber = count($stagePots) + 1;
         $autoPotName = 'POT ' . $nextNumber;
         while (
@@ -647,18 +689,13 @@ class TeamController extends BaseController
         return [
             'ok' => true,
             'pot_id' => $newPotId,
+            'is_sandbox' => 0,
             'pot' => $createdPot,
             'tournament_id' => $tournamentId,
-            'overflow_note' => "Semua pot sebelumnya penuh, otomatis membuat & masuk ke '{$autoPotName}'.",
+            'overflow_note' => "Semua pot penuh, otomatis membuat & masuk ke '{$autoPotName}'.",
         ];
     }
 
-    /**
-     * POST /teams
-     * Menambahkan tim baru secara manual:
-     * - Jika Pot dikosongkan -> Otomatis masuk ke Pot paling atas yang masih tersedia!
-     * - Jika Pot 1 penuh -> Otomatis pindah ke Pot 2 (atau buat Pot baru jika semua penuh)!
-     */
     public function store()
     {
         $this->cleanupRosterData();
@@ -682,18 +719,17 @@ class TeamController extends BaseController
         $requestedTournamentId = $this->normalizeTournamentId($data['tournament_id'] ?? null) ?? 0;
         $rawPotName = trim((string) ($data['pot_name'] ?? ''));
         $stage = strtolower(trim((string) ($data['stage'] ?? 'kualifikasi')));
-        if (!in_array($stage, ['kualifikasi', 'semifinal', 'grandfinal'], true)) {
+        if (!in_array($stage, ['kualifikasi', 'semifinal', 'grandfinal', 'sandbox'], true)) {
             $stage = 'kualifikasi';
         }
 
-        // Jalankan Smart Pot Allocator (Auto-Assign ke Pot teratas + Auto-Overflow jika penuh)
         $allocation = $this->resolveTargetPotWithAutoOverflow(
             $requestedTournamentId,
             $stage,
             $requestedPotId,
             $rawPotName,
             null,
-            true // Otomatis masukkan ke Pot teratas meskipun user lupa mengisi kolom Nama Pot!
+            true
         );
 
         if (!$allocation['ok']) {
@@ -701,6 +737,7 @@ class TeamController extends BaseController
         }
 
         $potId = $allocation['pot_id'];
+        $isSandbox = (int) ($allocation['is_sandbox'] ?? 0);
         $targetTournamentId = (int) $allocation['tournament_id'];
         $overflowNote = (string) ($allocation['overflow_note'] ?? '');
 
@@ -718,13 +755,17 @@ class TeamController extends BaseController
             return $this->teamErrorResponse($this->duplicateTeamMessage($name, $duplicate, $potId), $isAjax);
         }
 
-        $teamId = (int) $this->teamModel->insert([
+        $insertRow = [
             'tournament_id' => $targetTournamentId > 0 ? $targetTournamentId : null,
             'pot_id' => $potId,
             'name' => $name,
             'sort_order' => $sortOrder === '' ? ($existingCount + 1) : (int) $sortOrder,
-        ], true);
+        ];
+        if ($this->hasSandboxCol) {
+            $insertRow['is_sandbox'] = $isSandbox;
+        }
 
+        $teamId = (int) $this->teamModel->insert($insertRow, true);
         $this->syncMembersFromText($teamId, $memberText);
 
         $redirectTo = trim((string) ($data['redirect_to'] ?? ''));
@@ -783,6 +824,7 @@ class TeamController extends BaseController
     public function bulkUpdate()
     {
         $this->cleanupRosterData();
+        $isAjax = $this->request->isAJAX();
         $redirectTo = trim((string) ($this->request->getPost('redirect_to') ?? ''));
         if ($redirectTo === '' || str_contains($redirectTo, 'imports/teams')) {
             $redirectTo = site_url('teams/roster?tab=roster');
@@ -791,13 +833,21 @@ class TeamController extends BaseController
         $teamsPayload = $this->sanitizeTeamsPayload((array) $this->request->getPost('teams'));
 
         if (!is_array($teamsPayload) || $teamsPayload === []) {
-            return redirect()->to($redirectTo)->with('error', 'Belum ada perubahan team yang bisa disimpan.');
+            return $this->teamErrorResponse('Belum ada perubahan team yang bisa disimpan.', $isAjax);
         }
 
         $singleTeamId = $this->normalizeBulkTeamId($this->request->getPost('save_single_team_id'));
         if ($singleTeamId === null) {
             $teamsPayload = $this->filterChangedBulkPayload($teamsPayload);
             if ($teamsPayload === []) {
+                if ($isAjax) {
+                    return $this->response->setJSON([
+                        'status' => 'info',
+                        'message' => 'Tidak ada perubahan baru untuk disimpan.',
+                        'csrfTokenName' => csrf_token(),
+                        'csrfHash' => csrf_hash(),
+                    ]);
+                }
                 return redirect()->to($redirectTo)->with('info', 'Tidak ada perubahan baru untuk disimpan.');
             }
         }
@@ -832,19 +882,126 @@ class TeamController extends BaseController
             if ($db->transStatus() !== false) {
                 $db->transRollback();
             }
-
-            return redirect()->to($redirectTo)->withInput()->with('error', $e->getMessage());
-        }
-
-        if ($updatedCount <= 0) {
-            return redirect()->to($redirectTo)->with('error', 'Tidak ada team yang diperbarui.');
+            return $this->teamErrorResponse($e->getMessage(), $isAjax);
         }
 
         $successMessage = $singleTeamId !== null
             ? $lastMessage
             : $updatedCount . ' team berhasil diperbarui.';
 
+        if ($isAjax) {
+            return $this->response->setJSON([
+                'status' => 'success',
+                'message' => $successMessage,
+                'updatedCount' => $updatedCount,
+                'csrfTokenName' => csrf_token(),
+                'csrfHash' => csrf_hash(),
+            ]);
+        }
+
         return redirect()->to($redirectTo)->with('success', $successMessage);
+    }
+
+    /**
+     * POST /teams/bulk-action
+     * Menangani aksi massal dari checkbox tabel Raw Teams (Auto-Overflow, Unassigned, Sandbox, Hapus Aman)
+     */
+    public function bulkAction()
+    {
+        $this->cleanupRosterData();
+        $payload = $this->request->getJSON(true);
+        if (!is_array($payload)) {
+            $payload = $this->request->getPost();
+        }
+
+        $teamIds = array_values(array_filter(array_map('intval', (array) ($payload['team_ids'] ?? []))));
+        $action = trim((string) ($payload['action'] ?? ''));
+        $tournamentId = (int) ($payload['tournament_id'] ?? 0);
+
+        if ($teamIds === [] || $action === '') {
+            return $this->response->setStatusCode(422)->setJSON([
+                'status' => 'error',
+                'message' => 'Pilih minimal 1 tim dan aksi yang ingin dijalankan.',
+                'csrfTokenName' => csrf_token(),
+                'csrfHash' => csrf_hash(),
+            ]);
+        }
+
+        $db = db_connect();
+        try {
+            $db->transException(true)->transStart();
+
+            switch ($action) {
+                case 'to_sandbox':
+                    $upd = ['pot_id' => null];
+                    if ($this->hasSandboxCol) {
+                        $upd['is_sandbox'] = 1;
+                    }
+                    $this->teamModel->whereIn('id', $teamIds)->set($upd)->update();
+                    $msg = count($teamIds) . ' tim berhasil dipindahkan ke Sandbox / Recycle Bin.';
+                    break;
+
+                case 'to_unassigned':
+                    $upd = ['pot_id' => null];
+                    if ($this->hasSandboxCol) {
+                        $upd['is_sandbox'] = 0;
+                    }
+                    $this->teamModel->whereIn('id', $teamIds)->set($upd)->update();
+                    $msg = count($teamIds) . ' tim berhasil dikembalikan ke Unassigned.';
+                    break;
+
+                case 'auto_overflow':
+                    foreach ($teamIds as $id) {
+                        $team = $this->teamModel->find($id);
+                        if (!$team) {
+                            continue;
+                        }
+                        $tId = $tournamentId > 0 ? $tournamentId : (int) ($team['tournament_id'] ?? 0);
+                        $alloc = $this->resolveTargetPotWithAutoOverflow($tId, 'kualifikasi', null, '', $id, true);
+                        if ($alloc['ok']) {
+                            $upd = [
+                                'pot_id' => $alloc['pot_id'],
+                                'tournament_id' => $alloc['tournament_id'],
+                            ];
+                            if ($this->hasSandboxCol) {
+                                $upd['is_sandbox'] = 0;
+                            }
+                            $this->teamModel->update($id, $upd);
+                        }
+                    }
+                    $msg = count($teamIds) . ' tim berhasil dialokasikan otomatis ke Pot aktif.';
+                    break;
+
+                case 'delete_safe':
+                    $this->scoreModel->whereIn('team_id', $teamIds)->delete();
+                    $this->teamMemberModel->whereIn('team_id', $teamIds)->delete();
+                    $this->teamModel->whereIn('id', $teamIds)->delete();
+                    $msg = count($teamIds) . ' tim beserta skor & anggotanya berhasil dihapus secara aman.';
+                    break;
+
+                default:
+                    throw new \RuntimeException('Aksi massal tidak dikenali.');
+            }
+
+            $db->transComplete();
+        } catch (\Throwable $e) {
+            if ($db->transStatus() !== false) {
+                $db->transRollback();
+            }
+            return $this->response->setStatusCode(500)->setJSON([
+                'status' => 'error',
+                'message' => 'Gagal memproses aksi massal: ' . $e->getMessage(),
+                'csrfTokenName' => csrf_token(),
+                'csrfHash' => csrf_hash(),
+            ]);
+        }
+
+        return $this->response->setJSON([
+            'status' => 'success',
+            'message' => $msg,
+            'csrfTokenName' => csrf_token(),
+            'csrfHash' => csrf_hash(),
+        ]);
     }
 
     public function delete(int $id)
@@ -872,36 +1029,14 @@ class TeamController extends BaseController
                     'csrfHash' => csrf_hash(),
                 ]);
             }
-
             throw PageNotFoundException::forPageNotFound('Team tidak ditemukan.');
         }
 
         $potId = isset($team['pot_id']) && $team['pot_id'] !== null ? (int) $team['pot_id'] : null;
         $pot = $potId !== null ? $this->potWithTournament($potId) : null;
-        if ($potId !== null && $pot === null) {
-            if ($isAjax) {
-                return $this->response->setStatusCode(404)->setJSON([
-                    'status' => 'error',
-                    'message' => 'Pot team tidak ditemukan.',
-                    'csrfTokenName' => csrf_token(),
-                    'csrfHash' => csrf_hash(),
-                ]);
-            }
-
-            return redirect()->back()->with('error', 'Pot team tidak ditemukan.');
-        }
 
         if ($pot !== null && !$this->isPotEditable($pot)) {
-            if ($isAjax) {
-                return $this->response->setStatusCode(422)->setJSON([
-                    'status' => 'error',
-                    'message' => 'Tournament sudah finished. Team tidak bisa dihapus.',
-                    'csrfTokenName' => csrf_token(),
-                    'csrfHash' => csrf_hash(),
-                ]);
-            }
-
-            return redirect()->back()->with('error', 'Tournament sudah finished. Team tidak bisa dihapus.');
+            return $this->teamErrorResponse('Tournament sudah finished. Team tidak bisa dihapus.', $isAjax);
         }
 
         $db = db_connect();
@@ -920,11 +1055,15 @@ class TeamController extends BaseController
                 }
 
                 $nextSortOrder = $this->teamModel->where('pot_id IS NULL', null, false)->countAllResults() + 1;
-                $this->teamModel->update($id, [
-                    'tournament_id' => $pot !== null ? (int) ($pot['tournament_id'] ?? 0) : null,
+                $upd = [
+                    'tournament_id' => $pot !== null ? (int) ($pot['tournament_id'] ?? 0) : $team['tournament_id'],
                     'pot_id' => null,
                     'sort_order' => $nextSortOrder,
-                ]);
+                ];
+                if ($this->hasSandboxCol) {
+                    $upd['is_sandbox'] = 0;
+                }
+                $this->teamModel->update($id, $upd);
             } else {
                 $this->scoreModel->where('team_id', $id)->delete();
                 $this->teamMemberModel->where('team_id', $id)->delete();
@@ -935,30 +1074,13 @@ class TeamController extends BaseController
             if ($db->transStatus() !== false) {
                 $db->transRollback();
             }
-
-            if ($isAjax) {
-                return $this->response->setStatusCode(500)->setJSON([
-                    'status' => 'error',
-                    'message' => $deleteMode === 'detach'
-                        ? 'Team gagal dilepas dari pot.'
-                        : 'Team gagal dihapus. Data score terkait belum bisa dibersihkan.',
-                    'csrfTokenName' => csrf_token(),
-                    'csrfHash' => csrf_hash(),
-                ]);
-            }
-
-            return redirect()->to($fallbackUrl)
-                ->with('error', $deleteMode === 'detach'
-                    ? 'Team gagal dilepas dari pot.'
-                    : 'Team gagal dihapus. Data score terkait belum bisa dibersihkan.');
+            return $this->teamErrorResponse('Gagal memproses penghapusan tim.', $isAjax);
         }
 
         if ($isAjax) {
             return $this->response->setJSON([
                 'status' => 'success',
-                'message' => $deleteMode === 'detach'
-                    ? 'Team berhasil dilepas dari pot. Data team tetap tersimpan.'
-                    : 'Team berhasil dihapus.',
+                'message' => $deleteMode === 'detach' ? 'Team dilepas dari pot.' : 'Team berhasil dihapus.',
                 'teamId' => $id,
                 'potId' => $potId ?? 0,
                 'csrfTokenName' => csrf_token(),
@@ -966,39 +1088,18 @@ class TeamController extends BaseController
             ]);
         }
 
-        return redirect()->to($fallbackUrl)
-            ->with('success', $deleteMode === 'detach'
-                ? 'Team berhasil dilepas dari pot. Data team tetap tersimpan.'
-                : 'Team berhasil dihapus.');
+        return redirect()->to($fallbackUrl)->with('success', $deleteMode === 'detach' ? 'Team dilepas dari pot.' : 'Team berhasil dihapus.');
     }
 
     private function rules(): array
     {
         return [
-            'pot_id' => [
-                'label' => 'Pot',
-                'rules' => 'permit_empty|is_natural',
-            ],
-            'tournament_id' => [
-                'label' => 'Tournament',
-                'rules' => 'permit_empty|is_natural',
-            ],
-            'stage' => [
-                'label' => 'Stage',
-                'rules' => 'permit_empty|in_list[kualifikasi,semifinal,grandfinal]',
-            ],
-            'pot_name' => [
-                'label' => 'Nama Pot',
-                'rules' => 'permit_empty|max_length[100]',
-            ],
-            'name' => [
-                'label' => 'Nama team',
-                'rules' => 'permit_empty|max_length[150]',
-            ],
-            'sort_order' => [
-                'label' => 'Urutan',
-                'rules' => 'permit_empty|is_natural',
-            ],
+            'pot_id' => ['label' => 'Pot', 'rules' => 'permit_empty|is_natural'],
+            'tournament_id' => ['label' => 'Tournament', 'rules' => 'permit_empty|is_natural'],
+            'stage' => ['label' => 'Stage', 'rules' => 'permit_empty|in_list[kualifikasi,semifinal,grandfinal,sandbox]'],
+            'pot_name' => ['label' => 'Nama Pot', 'rules' => 'permit_empty|max_length[100]'],
+            'name' => ['label' => 'Nama team', 'rules' => 'permit_empty|max_length[150]'],
+            'sort_order' => ['label' => 'Urutan', 'rules' => 'permit_empty|is_natural'],
         ];
     }
 
@@ -1128,10 +1229,8 @@ class TeamController extends BaseController
             $escaped = array_map(function ($value): string {
                 $string = str_replace(["\r", "\n"], ' ', (string) ($value ?? ''));
                 $string = str_replace('"', '""', $string);
-
                 return '"' . $string . '"';
             }, $row);
-
             return implode(',', $escaped);
         }, $matrix);
 
@@ -1144,7 +1243,6 @@ class TeamController extends BaseController
             $escaped = array_map(static function ($value): string {
                 return str_replace(["\t", "\r", "\n"], [' ', ' ', ' '], (string) ($value ?? ''));
             }, $row);
-
             return implode("\t", $escaped);
         }, $matrix);
 
@@ -1155,13 +1253,11 @@ class TeamController extends BaseController
     {
         $name = '';
         $index = $columnNumber;
-
         while ($index > 0) {
             $index--;
             $name = chr(65 + ($index % 26)) . $name;
             $index = intdiv($index, 26);
         }
-
         return $name;
     }
 
@@ -1179,11 +1275,6 @@ class TeamController extends BaseController
         }
     }
 
-    private function normalizeMemberText(string $memberText): string
-    {
-        return implode(', ', $this->memberListFromText($memberText));
-    }
-
     private function memberListFromText(string $memberText): array
     {
         $memberText = $this->cleanRosterText($memberText, 1000, true);
@@ -1196,7 +1287,6 @@ class TeamController extends BaseController
             if ($name === '') {
                 continue;
             }
-
             $members[] = preg_replace('/\s+/u', ' ', $name) ?? $name;
         }
 
@@ -1207,7 +1297,6 @@ class TeamController extends BaseController
     {
         $value = $this->cleanRosterText($value, 150);
         $value = strtolower(trim($value));
-
         return preg_replace('/[^a-z0-9]+/u', '', $value) ?? '';
     }
 
@@ -1242,7 +1331,6 @@ class TeamController extends BaseController
             if ($name === '') {
                 continue;
             }
-
             $membersByTeam[(int) $member['team_id']][] = $name;
         }
 
@@ -1279,7 +1367,6 @@ class TeamController extends BaseController
         if ($value === '' || $value === '0' || !ctype_digit($value)) {
             return null;
         }
-
         $potId = (int) $value;
         return $potId > 0 ? $potId : null;
     }
@@ -1290,7 +1377,6 @@ class TeamController extends BaseController
         if ($value === '' || $value === '0' || !ctype_digit($value)) {
             return null;
         }
-
         $tournamentId = (int) $value;
         return $tournamentId > 0 ? $tournamentId : null;
     }
@@ -1299,13 +1385,14 @@ class TeamController extends BaseController
     {
         try {
             $db = db_connect();
-            $db->query('
+            $set = 't.tournament_id = p.tournament_id' . ($this->hasSandboxCol ? ', t.is_sandbox = 0' : '');
+            $db->query("
                 UPDATE teams t
                 INNER JOIN pots p ON p.id = t.pot_id
-                SET t.tournament_id = p.tournament_id
+                SET {$set}
                 WHERE t.pot_id IS NOT NULL
-                  AND (t.tournament_id IS NULL OR t.tournament_id = 0 OR t.tournament_id != p.tournament_id)
-            ');
+                  AND (t.tournament_id IS NULL OR t.tournament_id = 0 OR t.tournament_id != p.tournament_id" . ($this->hasSandboxCol ? ' OR t.is_sandbox != 0' : '') . ")
+            ");
         } catch (\Throwable $e) {
             // ignore on read-only
         }
@@ -1316,33 +1403,26 @@ class TeamController extends BaseController
         if (isset($data['name'])) {
             $data['name'] = $this->cleanRosterText((string) $data['name'], 150);
         }
-
         if (isset($data['member_text'])) {
             $data['member_text'] = $this->cleanRosterText((string) $data['member_text'], 1000, true);
         }
-
         if (isset($data['redirect_to'])) {
             $data['redirect_to'] = $this->cleanRosterText((string) $data['redirect_to'], 255);
         }
-
         if (isset($data['sort_order'])) {
             $data['sort_order'] = $this->cleanRosterText((string) $data['sort_order'], 20);
         }
-
         if (isset($data['tournament_id'])) {
             $data['tournament_id'] = $this->cleanRosterText((string) $data['tournament_id'], 20);
         }
-
         if (isset($data['pot_id'])) {
             $data['pot_id'] = $this->cleanRosterText((string) $data['pot_id'], 20);
         }
-
         if (isset($data['stage'])) {
             $rawStage = strtolower(trim((string) $data['stage']));
             $rawStage = str_replace([' ', '_', '-'], '', $rawStage);
             $data['stage'] = $this->cleanRosterText($rawStage, 50);
         }
-
         if (isset($data['pot_name'])) {
             $data['pot_name'] = $this->cleanRosterText((string) $data['pot_name'], 100);
         }
@@ -1356,10 +1436,8 @@ class TeamController extends BaseController
             if (!is_array($rowData)) {
                 continue;
             }
-
             $teamsPayload[$teamId] = $this->sanitizeTeamPayload($rowData);
         }
-
         return $teamsPayload;
     }
 
@@ -1381,22 +1459,14 @@ class TeamController extends BaseController
         if ($allowLineBreaks) {
             $value = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/u', '', $value) ?? $value;
             $value = preg_replace('/\r\n?/', "\n", $value) ?? $value;
-        } else {
-            $value = preg_replace('/[\x00-\x1F\x7F]/u', '', $value) ?? $value;
-        }
-
-        if ($allowLineBreaks) {
             $value = preg_replace('/[^\S\n]+/u', ' ', $value) ?? $value;
         } else {
+            $value = preg_replace('/[\x00-\x1F\x7F]/u', '', $value) ?? $value;
             $value = preg_replace('/\s+/u', ' ', $value) ?? $value;
         }
         $value = trim($value);
 
-        if (function_exists('mb_substr')) {
-            return mb_substr($value, 0, $maxLength);
-        }
-
-        return substr($value, 0, $maxLength);
+        return function_exists('mb_substr') ? mb_substr($value, 0, $maxLength) : substr($value, 0, $maxLength);
     }
 
     private function allowsUnassignedTeams(): bool
@@ -1410,7 +1480,6 @@ class TeamController extends BaseController
         if ($value === '' || !ctype_digit($value)) {
             return null;
         }
-
         $teamId = (int) $value;
         return $teamId > 0 ? $teamId : null;
     }
@@ -1418,34 +1487,19 @@ class TeamController extends BaseController
     private function filterChangedBulkPayload(array $teamsPayload): array
     {
         $changed = [];
-
         foreach ($teamsPayload as $teamId => $rowData) {
-            if (!is_array($rowData)) {
-                continue;
-            }
-
-            if ($this->bulkRowHasChanges($rowData)) {
+            if (is_array($rowData) && trim((string) ($rowData['__changed'] ?? '')) === '1') {
                 $changed[$teamId] = $rowData;
             }
         }
-
         return $changed;
-    }
-
-    private function bulkRowHasChanges(array $rowData): bool
-    {
-        return trim((string) ($rowData['__changed'] ?? '')) === '1';
     }
 
     private function applyTeamUpdate(int $id, array $data, bool $allowsUnassigned): array
     {
         $team = $this->teamModel->find($id);
         if ($team === null) {
-            return [
-                'ok' => false,
-                'message' => 'Team tidak ditemukan.',
-                'validation' => [],
-            ];
+            return ['ok' => false, 'message' => 'Team tidak ditemukan.', 'validation' => []];
         }
 
         $currentPot = isset($team['pot_id']) && $team['pot_id'] !== null
@@ -1453,21 +1507,12 @@ class TeamController extends BaseController
             : null;
 
         if ($currentPot !== null && !$this->isPotEditable($currentPot)) {
-            return [
-                'ok' => false,
-                'message' => 'Tournament sudah finished. Team tidak bisa diubah.',
-                'validation' => [],
-            ];
+            return ['ok' => false, 'message' => 'Tournament sudah finished. Team tidak bisa diubah.', 'validation' => []];
         }
 
         $data = $this->sanitizeTeamPayload($data);
-
         if (!$this->validateData($data, $this->rules())) {
-            return [
-                'ok' => false,
-                'message' => 'Perubahan team belum valid.',
-                'validation' => $this->validator->getErrors(),
-            ];
+            return ['ok' => false, 'message' => 'Perubahan team belum valid.', 'validation' => $this->validator->getErrors()];
         }
 
         $requestedTournamentId = $this->normalizeTournamentId($data['tournament_id'] ?? $team['tournament_id'] ?? null) ?? 0;
@@ -1477,65 +1522,67 @@ class TeamController extends BaseController
 
         $explicitPotId = $this->normalizePotId($data['pot_id'] ?? null);
         $rawPotName = trim((string) ($data['pot_name'] ?? ''));
-
         $rawStageInput = strtolower(trim((string) ($data['stage'] ?? '')));
         $stage = str_replace([' ', '_', '-'], '', $rawStageInput);
-        $hasValidStage = in_array($stage, ['kualifikasi', 'semifinal', 'grandfinal'], true);
-        if (!$hasValidStage) {
-            $stage = $currentPot !== null ? strtolower((string) ($currentPot['stage'] ?? 'kualifikasi')) : 'kualifikasi';
-        }
 
-        // Jika user memilih Tahapan (Stage) misal "Kualifikasi", tapi lupa mengisi Nama Pot pada tim yang tadinya Tanpa Pot,
-        // maka otomatis masukkan ke Pot teratas di tahapan tersebut!
-        $wasUnassigned = ($team['pot_id'] === null || (int) $team['pot_id'] === 0);
-        $autoAssignIfEmpty = ($wasUnassigned && $hasValidStage) || (!array_key_exists('pot_name', $data) && !array_key_exists('pot_id', $data));
-
-        $overflowNote = '';
-
-        // Jika tim sudah berada di sebuah pot dan user tidak mengubah pot-nya, pertahankan pot saat ini
-        if (
-            !$wasUnassigned
-            && $explicitPotId === null
-            && $rawPotName !== ''
-            && $currentPot !== null
-            && strtolower(trim((string) $currentPot['name'])) === strtolower(trim(preg_replace('/^\[[^\]]+\]\s*-\s*/u', '', $rawPotName)))
-            && strtolower((string) ($currentPot['stage'] ?? 'kualifikasi')) === $stage
-        ) {
-            $targetPotId = (int) $currentPot['id'];
-            $targetTournamentId = (int) $currentPot['tournament_id'];
+        if ($stage === 'sandbox') {
+            $targetPotId = null;
+            $isSandbox = 1;
+            $targetTournamentId = $requestedTournamentId;
+            $overflowNote = 'Dipindahkan ke Sandbox / Recycle Bin.';
+        } elseif ($stage === '' && $rawPotName === '' && $explicitPotId === null) {
+            $targetPotId = null;
+            $isSandbox = 0;
+            $targetTournamentId = $requestedTournamentId;
+            $overflowNote = '';
         } else {
-            $allocation = $this->resolveTargetPotWithAutoOverflow(
-                $requestedTournamentId,
-                $stage,
-                $explicitPotId,
-                $rawPotName,
-                $id,
-                $autoAssignIfEmpty
-            );
-
-            if (!$allocation['ok']) {
-                return [
-                    'ok' => false,
-                    'message' => $allocation['message'],
-                    'validation' => [],
-                ];
+            $hasValidStage = in_array($stage, ['kualifikasi', 'semifinal', 'grandfinal'], true);
+            if (!$hasValidStage) {
+                $stage = $currentPot !== null ? strtolower((string) ($currentPot['stage'] ?? 'kualifikasi')) : 'kualifikasi';
             }
 
-            $targetPotId = $allocation['pot_id'];
-            $targetTournamentId = (int) $allocation['tournament_id'];
-            $overflowNote = (string) ($allocation['overflow_note'] ?? '');
+            $wasUnassigned = ($team['pot_id'] === null || (int) $team['pot_id'] === 0);
+            $autoAssignIfEmpty = ($wasUnassigned && $hasValidStage) || (!array_key_exists('pot_name', $data) && !array_key_exists('pot_id', $data));
+            $overflowNote = '';
+
+            if (
+                !$wasUnassigned
+                && $explicitPotId === null
+                && $rawPotName !== ''
+                && $currentPot !== null
+                && strtolower(trim((string) $currentPot['name'])) === strtolower(trim(preg_replace('/^\[[^\]]+\]\s*-\s*/u', '', $rawPotName)))
+                && strtolower((string) ($currentPot['stage'] ?? 'kualifikasi')) === $stage
+            ) {
+                $targetPotId = (int) $currentPot['id'];
+                $isSandbox = 0;
+                $targetTournamentId = (int) $currentPot['tournament_id'];
+            } else {
+                $allocation = $this->resolveTargetPotWithAutoOverflow(
+                    $requestedTournamentId,
+                    $stage,
+                    $explicitPotId,
+                    $rawPotName,
+                    $id,
+                    $autoAssignIfEmpty
+                );
+
+                if (!$allocation['ok']) {
+                    return ['ok' => false, 'message' => $allocation['message'], 'validation' => []];
+                }
+
+                $targetPotId = $allocation['pot_id'];
+                $isSandbox = (int) ($allocation['is_sandbox'] ?? 0);
+                $targetTournamentId = (int) $allocation['tournament_id'];
+                $overflowNote = (string) ($allocation['overflow_note'] ?? '');
+            }
         }
 
         $name = $this->cleanRosterText((string) ($data['name'] ?? ''), 150);
         $sortOrder = $this->cleanRosterText((string) ($data['sort_order'] ?? ''), 20);
         $finalName = $name === '' ? (string) $team['name'] : $name;
 
-        if (($duplicate = $this->findDuplicateTeamInScope($finalName, $targetPotId, $id, $targetTournamentId)) !== null) {
-            return [
-                'ok' => false,
-                'message' => $this->duplicateTeamMessage($finalName, $duplicate, $targetPotId),
-                'validation' => [],
-            ];
+        if ($isSandbox === 0 && ($duplicate = $this->findDuplicateTeamInScope($finalName, $targetPotId, $id, $targetTournamentId)) !== null) {
+            return ['ok' => false, 'message' => $this->duplicateTeamMessage($finalName, $duplicate, $targetPotId), 'validation' => []];
         }
 
         $finalSortOrder = $sortOrder !== '' ? (int) $sortOrder : (int) ($team['sort_order'] ?? 1);
@@ -1543,12 +1590,17 @@ class TeamController extends BaseController
             $finalSortOrder = $this->teamModel->where('pot_id', $targetPotId)->countAllResults() + 1;
         }
 
-        $this->teamModel->update($id, [
+        $updRow = [
             'tournament_id' => $targetTournamentId > 0 ? $targetTournamentId : null,
             'pot_id' => $targetPotId,
             'name' => $finalName,
             'sort_order' => max(1, $finalSortOrder),
-        ]);
+        ];
+        if ($this->hasSandboxCol) {
+            $updRow['is_sandbox'] = $isSandbox;
+        }
+
+        $this->teamModel->update($id, $updRow);
 
         if (array_key_exists('member_text', $data)) {
             $this->syncMembersFromText($id, (string) ($data['member_text'] ?? ''));
@@ -1583,6 +1635,9 @@ class TeamController extends BaseController
         } elseif ($targetTournamentId !== null && $targetTournamentId > 0) {
             $builder->where('teams.pot_id IS NULL', null, false)
                 ->where('teams.tournament_id', $targetTournamentId);
+            if ($this->hasSandboxCol) {
+                $builder->where('teams.is_sandbox', 0);
+            }
         }
 
         foreach ($builder->findAll() as $team) {
@@ -1607,23 +1662,19 @@ class TeamController extends BaseController
         }
 
         $potName = trim((string) ($duplicateTeam['pot_name'] ?? ''));
-        if ($potName !== '') {
-            return 'Nama team "' . $safeTeamName . '" sudah ada di ' . $potName . '.';
-        }
-
-        return 'Nama team "' . $safeTeamName . '" sudah ada di dalam pot tersebut.';
+        return $potName !== ''
+            ? 'Nama team "' . $safeTeamName . '" sudah ada di ' . $potName . '.'
+            : 'Nama team "' . $safeTeamName . '" sudah ada di dalam pot tersebut.';
     }
 
     private function nextAvailableTeamName(?int $targetPotId, int $seed = 1): string
     {
         $candidate = max(1, $seed);
-
         while (true) {
             $name = 'Team ' . $candidate;
             if ($this->findDuplicateTeamInScope($name, $targetPotId) === null) {
                 return $name;
             }
-
             $candidate++;
         }
     }
@@ -1641,23 +1692,35 @@ class TeamController extends BaseController
         }
 
         $redirect = redirect()->back()->with('error', $message);
-
         return $validation === [] ? $redirect : $redirect->with('validation', $validation);
     }
 
     /**
      * GET /teams/drag-manager
-     * Menyiapkan data untuk view drag_manager.php
+     * Menyiapkan data untuk view drag_manager.php (Unassigned + Sandbox + Pots)
      */
     public function dragManager()
     {
         $this->cleanupRosterData();
 
-        $unassignedTeams = $this->teamModel
-            ->where('pot_id IS NULL', null, false)
+        $unassignedBuilder = $this->teamModel->where('pot_id IS NULL', null, false);
+        if ($this->hasSandboxCol) {
+            $unassignedBuilder->where('is_sandbox', 0);
+        }
+        $unassignedTeams = $unassignedBuilder
             ->orderBy('sort_order', 'ASC')
             ->orderBy('name', 'ASC')
             ->findAll();
+
+        $sandboxTeams = [];
+        if ($this->hasSandboxCol) {
+            $sandboxTeams = $this->teamModel
+                ->where('pot_id IS NULL', null, false)
+                ->where('is_sandbox', 1)
+                ->orderBy('sort_order', 'ASC')
+                ->orderBy('name', 'ASC')
+                ->findAll();
+        }
 
         $tournaments = $this->tournamentModel->orderBy('created_at', 'DESC')->findAll();
 
@@ -1699,16 +1762,14 @@ class TeamController extends BaseController
         return view('teams/drag_manager', [
             'pageTitle' => 'Drag & Drop Team Manager',
             'unassignedTeams' => $unassignedTeams,
+            'sandboxTeams' => $sandboxTeams,
             'tournaments' => $tournaments,
         ]);
     }
 
     /**
      * POST /teams/drag-manager/save
-     * Mendukung:
-     * 1. Jumlah tim bebas per pot (termasuk < 12 tim atau 0 tim)
-     * 2. Perpindahan biasa (Move)
-     * 3. Multi-Pot / Naik Babak (Clone tim + anggota roster ke pot baru dalam 1 turnamen)
+     * Mendukung Move, Clone/Promote Multi-Pot, Unassigned (pot_id = 0), dan Sandbox (pot_id = -1)
      */
     public function saveDragManager()
     {
@@ -1745,7 +1806,9 @@ class TeamController extends BaseController
                 $isClone = !empty($row['is_clone']);
                 $teamId = (int) ($row['team_id'] ?? 0);
                 $sourceTeamId = (int) ($row['source_team_id'] ?? $teamId);
-                $potId = (!empty($row['pot_id']) && (int) $row['pot_id'] > 0) ? (int) $row['pot_id'] : null;
+                $rawPotId = (int) ($row['pot_id'] ?? 0);
+                $isSandbox = (!empty($row['is_sandbox']) || $rawPotId === -1) ? 1 : 0;
+                $potId = ($rawPotId > 0 && $isSandbox === 0) ? $rawPotId : null;
                 $sortOrder = max(1, (int) ($row['sort_order'] ?? 1));
 
                 $tournamentId = null;
@@ -1755,7 +1818,7 @@ class TeamController extends BaseController
                     $tournamentId = (int) $row['tournament_id'];
                 }
 
-                // KASUS A: Tim hasil Promosi / Lolos Babak (Multi-Pot dalam 1 Turnamen)
+                // KASUS A: Tim hasil Promosi / Lolos Babak (Multi-Pot Clone)
                 if ($isClone && $sourceTeamId > 0 && $potId !== null) {
                     $sourceTeam = $this->teamModel->find($sourceTeamId);
                     if ($sourceTeam === null) {
@@ -1768,20 +1831,29 @@ class TeamController extends BaseController
                         ->first();
 
                     if ($alreadyInPot !== null) {
-                        $this->teamModel->update((int) $alreadyInPot['id'], [
+                        $updClone = [
                             'tournament_id' => $tournamentId,
                             'sort_order' => $sortOrder,
-                        ]);
+                        ];
+                        if ($this->hasSandboxCol) {
+                            $updClone['is_sandbox'] = 0;
+                        }
+                        $this->teamModel->update((int) $alreadyInPot['id'], $updClone);
                         $updatedCount++;
                         continue;
                     }
 
-                    $newTeamId = (int) $this->teamModel->insert([
+                    $insClone = [
                         'tournament_id' => $tournamentId ?? $sourceTeam['tournament_id'],
                         'pot_id' => $potId,
                         'name' => (string) $sourceTeam['name'],
                         'sort_order' => $sortOrder,
-                    ], true);
+                    ];
+                    if ($this->hasSandboxCol) {
+                        $insClone['is_sandbox'] = 0;
+                    }
+
+                    $newTeamId = (int) $this->teamModel->insert($insClone, true);
 
                     if ($newTeamId > 0) {
                         $members = $this->teamMemberModel->where('team_id', $sourceTeamId)->findAll();
@@ -1797,7 +1869,7 @@ class TeamController extends BaseController
                     continue;
                 }
 
-                // KASUS B: Update / Pindah Pot Normal
+                // KASUS B: Update / Pindah ke Pot, Unassigned, atau Sandbox
                 if ($teamId <= 0) {
                     continue;
                 }
@@ -1811,11 +1883,16 @@ class TeamController extends BaseController
                     ? $tournamentId
                     : ($existingTeam['tournament_id'] !== null ? (int) $existingTeam['tournament_id'] : null);
 
-                $this->teamModel->update($teamId, [
+                $updRow = [
                     'pot_id' => $potId,
                     'tournament_id' => $finalTourneyId,
                     'sort_order' => $sortOrder,
-                ]);
+                ];
+                if ($this->hasSandboxCol) {
+                    $updRow['is_sandbox'] = $isSandbox;
+                }
+
+                $this->teamModel->update($teamId, $updRow);
                 $updatedCount++;
             }
 
@@ -1834,9 +1911,329 @@ class TeamController extends BaseController
 
         return $this->response->setJSON([
             'status' => 'success',
-            'message' => "Berhasil menyimpan! ({$updatedCount} tim diperbarui, {$clonedCount} tim dipromosikan ke pot baru).",
+            'message' => "Berhasil menyimpan! ({$updatedCount} tim diperbarui, {$clonedCount} tim dipromosikan).",
             'csrfTokenName' => csrf_token(),
             'csrfHash' => csrf_hash(),
         ]);
+    }
+
+    /**
+     * ========================================================================
+     * SMART CSV / SPREADSHEET IMPORT ENGINE (PREVIEW & DYNAMIC MAPPING)
+     * ========================================================================
+     */
+
+    public function rawCsvView()
+    {
+        $this->cleanupRosterData();
+        $tournaments = $this->tournamentModel->orderBy('created_at', 'DESC')->findAll();
+        $pots = $this->potModel
+            ->orderBy('tournament_id', 'DESC')
+            ->orderBy('stage', 'ASC')
+            ->orderBy('sort_order', 'ASC')
+            ->findAll();
+
+        return view('imports/raw_csv', [
+            'pageTitle' => 'Smart CSV & Spreadsheet Import Engine',
+            'tournaments' => $tournaments,
+            'pots' => $pots,
+        ]);
+    }
+
+    public function previewMappedCsv()
+    {
+        $rawRows = [];
+        $file = $this->request->getFile('team_file') ?? $this->request->getFile('csv_file');
+        $rawText = trim((string) ($this->request->getPost('raw_paste') ?? ''));
+
+        if ($file !== null && $file->isValid() && !$file->hasMoved()) {
+            $ext = strtolower((string) $file->getClientExtension());
+            if (!in_array($ext, ['csv', 'tsv', 'txt'], true)) {
+                return $this->response->setStatusCode(422)->setJSON([
+                    'status' => 'error',
+                    'message' => 'Untuk file di server hanya menerima .csv, .tsv, atau .txt. Untuk file .xlsx bisa dibaca langsung di browser atau Copy-Paste.',
+                    'csrfTokenName' => csrf_token(),
+                    'csrfHash' => csrf_hash(),
+                ]);
+            }
+
+            $lines = @file($file->getTempName(), FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+            if (is_array($lines) && $lines !== []) {
+                $lines[0] = preg_replace('/^\xEF\xBB\xBF/', '', (string) $lines[0]) ?? $lines[0];
+                $delimiter = $this->detectCsvDelimiter((string) $lines[0]);
+                foreach ($lines as $line) {
+                    if (trim($line) === '') {
+                        continue;
+                    }
+                    $parsed = str_getcsv($line, $delimiter);
+                    if ($this->hasNonEmptyCell($parsed)) {
+                        $rawRows[] = array_map(fn($v): string => $this->cleanRosterText((string) $v, 250), $parsed);
+                    }
+                }
+            }
+        } elseif ($rawText !== '') {
+            $lines = preg_split('/\r\n|\r|\n/', $rawText) ?: [];
+            if ($lines !== []) {
+                $delimiter = $this->detectCsvDelimiter((string) $lines[0]);
+                foreach ($lines as $line) {
+                    if (trim($line) === '') {
+                        continue;
+                    }
+                    $parsed = str_getcsv($line, $delimiter);
+                    if ($this->hasNonEmptyCell($parsed)) {
+                        $rawRows[] = array_map(fn($v): string => $this->cleanRosterText((string) $v, 250), $parsed);
+                    }
+                }
+            }
+        } else {
+            return $this->response->setStatusCode(422)->setJSON([
+                'status' => 'error',
+                'message' => 'Pilih file CSV/TSV atau tempel (paste) data dari Excel/Google Sheets terlebih dahulu.',
+                'csrfTokenName' => csrf_token(),
+                'csrfHash' => csrf_hash(),
+            ]);
+        }
+
+        if (count($rawRows) < 2) {
+            return $this->response->setStatusCode(422)->setJSON([
+                'status' => 'error',
+                'message' => 'Data minimal harus memiliki 1 baris Header dan 1 baris Data Tim.',
+                'csrfTokenName' => csrf_token(),
+                'csrfHash' => csrf_hash(),
+            ]);
+        }
+
+        $headers = array_shift($rawRows);
+        $autoMap = $this->guessSmartColumnMapping($headers);
+
+        return $this->response->setJSON([
+            'status' => 'success',
+            'headers' => $headers,
+            'preview_rows' => array_slice($rawRows, 0, 10),
+            'all_rows' => $rawRows,
+            'total_rows' => count($rawRows),
+            'auto_map' => $autoMap,
+            'csrfTokenName' => csrf_token(),
+            'csrfHash' => csrf_hash(),
+        ]);
+    }
+
+    public function processMappedCsv()
+    {
+        $this->cleanupRosterData();
+        $isAjax = $this->request->isAJAX();
+
+        $payload = $this->request->getJSON(true);
+        if (!is_array($payload)) {
+            $payload = $this->request->getPost();
+        }
+
+        $tournamentId = $this->normalizeTournamentId($payload['tournament_id'] ?? null) ?? 0;
+        if ($tournamentId <= 0) {
+            return $this->teamErrorResponse('Pilih Tournament tujuan terlebih dahulu.', $isAjax);
+        }
+
+        $stage = strtolower(trim((string) ($payload['stage'] ?? 'kualifikasi')));
+        if (!in_array($stage, ['kualifikasi', 'semifinal', 'grandfinal', 'sandbox'], true)) {
+            $stage = 'kualifikasi';
+        }
+
+        $importMode = trim((string) ($payload['import_mode'] ?? 'smart_overflow')); // smart_overflow | specific_pot | unassigned | sandbox
+        $explicitPotId = $this->normalizePotId($payload['pot_id'] ?? null);
+        $rows = $payload['rows'] ?? [];
+        $mapping = $payload['mapping'] ?? [];
+
+        if (!is_array($rows) || $rows === []) {
+            return $this->teamErrorResponse('Tidak ada baris data tim untuk diimport.', $isAjax);
+        }
+
+        $colTeamName = isset($mapping['team_name']) ? (int) $mapping['team_name'] : -1;
+        $colPotName = isset($mapping['pot_name']) ? (int) $mapping['pot_name'] : -1;
+        $colStage = isset($mapping['stage']) ? (int) $mapping['stage'] : -1;
+        $colMembers = isset($mapping['members']) && is_array($mapping['members'])
+            ? array_map('intval', $mapping['members'])
+            : [];
+
+        if ($colTeamName < 0) {
+            return $this->teamErrorResponse('Kolom "Nama Tim" wajib dipetakan terlebih dahulu.', $isAjax);
+        }
+
+        $db = db_connect();
+        $insertedCount = 0;
+        $updatedCount = 0;
+        $skippedCount = 0;
+        $potReport = [];
+
+        try {
+            $db->transException(true)->transStart();
+
+            foreach ($rows as $row) {
+                if (!is_array($row)) {
+                    continue;
+                }
+
+                $teamName = $this->cleanRosterText((string) ($row[$colTeamName] ?? ''), 150);
+                if ($teamName === '') {
+                    $skippedCount++;
+                    continue;
+                }
+
+                $rowPotName = ($colPotName >= 0 && isset($row[$colPotName])) ? $this->cleanRosterText((string) $row[$colPotName], 100) : '';
+                $rowStage = ($colStage >= 0 && isset($row[$colStage])) ? strtolower(trim((string) $row[$colStage])) : $stage;
+                $rowStage = str_replace([' ', '_', '-'], '', $rowStage);
+                if (!in_array($rowStage, ['kualifikasi', 'semifinal', 'grandfinal', 'sandbox'], true)) {
+                    $rowStage = $stage;
+                }
+
+                // Kumpulkan daftar anggota roster dari kolom yang dicentang user
+                $memberChunks = [];
+                foreach ($colMembers as $mIdx) {
+                    if ($mIdx >= 0 && !empty($row[$mIdx])) {
+                        $memberChunks[] = (string) $row[$mIdx];
+                    }
+                }
+                $memberText = implode(', ', $memberChunks);
+
+                // Tentukan penempatan Pot menggunakan Smart Pot Allocator
+                $targetPotId = null;
+                $isSandbox = 0;
+
+                if ($importMode === 'sandbox' || $rowStage === 'sandbox') {
+                    $isSandbox = 1;
+                    $potLabel = 'Sandbox';
+                } elseif ($importMode === 'unassigned') {
+                    $targetPotId = null;
+                    $potLabel = 'Unassigned';
+                } else {
+                    $reqPot = ($importMode === 'specific_pot' && $explicitPotId !== null) ? $explicitPotId : null;
+                    $alloc = $this->resolveTargetPotWithAutoOverflow(
+                        $tournamentId,
+                        $rowStage,
+                        $reqPot,
+                        $rowPotName,
+                        null,
+                        true
+                    );
+
+                    if (!$alloc['ok']) {
+                        throw new \RuntimeException($alloc['message']);
+                    }
+
+                    $targetPotId = $alloc['pot_id'];
+                    $isSandbox = (int) ($alloc['is_sandbox'] ?? 0);
+                    $potLabel = $alloc['pot']['name'] ?? ($isSandbox ? 'Sandbox' : 'Unassigned');
+                }
+
+                $potReport[$potLabel] = ($potReport[$potLabel] ?? 0) + 1;
+
+                // Cek apakah tim sudah ada di scope yang sama -> jika ada, sinkronisasi anggotanya tanpa duplikasi
+                $duplicate = $isSandbox === 0
+                    ? $this->findDuplicateTeamInScope($teamName, $targetPotId, null, $tournamentId)
+                    : null;
+
+                if ($duplicate !== null) {
+                    $dupId = (int) $duplicate['id'];
+                    if (trim($memberText) !== '') {
+                        $this->syncMembersFromText($dupId, $memberText);
+                    }
+                    $updatedCount++;
+                    continue;
+                }
+
+                $nextOrder = $targetPotId !== null
+                    ? $this->teamModel->where('pot_id', $targetPotId)->countAllResults() + 1
+                    : $this->teamModel->where('pot_id IS NULL', null, false)->countAllResults() + 1;
+
+                $insData = [
+                    'tournament_id' => $tournamentId,
+                    'pot_id' => $targetPotId,
+                    'name' => $teamName,
+                    'sort_order' => $nextOrder,
+                ];
+                if ($this->hasSandboxCol) {
+                    $insData['is_sandbox'] = $isSandbox;
+                }
+
+                $newTeamId = (int) $this->teamModel->insert($insData, true);
+                if (trim($memberText) !== '') {
+                    $this->syncMembersFromText($newTeamId, $memberText);
+                }
+
+                $insertedCount++;
+            }
+
+            $db->transComplete();
+        } catch (\Throwable $e) {
+            if ($db->transStatus() !== false) {
+                $db->transRollback();
+            }
+            return $this->teamErrorResponse('Gagal mengimpor data: ' . $e->getMessage(), $isAjax);
+        }
+
+        $reportParts = [];
+        foreach ($potReport as $pName => $cnt) {
+            $reportParts[] = "{$pName}: {$cnt} tim";
+        }
+        $summaryMsg = "Import selesai! {$insertedCount} tim baru ditambahkan, {$updatedCount} tim diperbarui"
+            . ($skippedCount > 0 ? ", {$skippedCount} baris kosong dilewati" : '')
+            . ($reportParts !== [] ? ' (' . implode(', ', $reportParts) . ').' : '.');
+
+        return $this->response->setJSON([
+            'status' => 'success',
+            'message' => $summaryMsg,
+            'insertedCount' => $insertedCount,
+            'updatedCount' => $updatedCount,
+            'skippedCount' => $skippedCount,
+            'potReport' => $potReport,
+            'redirectUrl' => site_url('teams/roster?tab=roster&tournament_id=' . $tournamentId),
+            'csrfTokenName' => csrf_token(),
+            'csrfHash' => csrf_hash(),
+        ]);
+    }
+
+    private function detectCsvDelimiter(string $sampleLine): string
+    {
+        $counts = [
+            "\t" => substr_count($sampleLine, "\t"),
+            ';' => substr_count($sampleLine, ';'),
+            ',' => substr_count($sampleLine, ','),
+        ];
+        arsort($counts);
+        return (string) key($counts);
+    }
+
+    private function hasNonEmptyCell(array $row): bool
+    {
+        foreach ($row as $cell) {
+            if (trim((string) $cell) !== '') {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private function guessSmartColumnMapping(array $headers): array
+    {
+        $map = [
+            'team_name' => -1,
+            'pot_name' => -1,
+            'stage' => -1,
+            'members' => [],
+        ];
+
+        foreach ($headers as $idx => $header) {
+            $norm = strtolower(trim((string) $header));
+            if ($map['team_name'] === -1 && preg_match('/(nama\s*tim|nama\s*team|team\s*name|nama_team|squad|^tim$|^team$)/i', $norm)) {
+                $map['team_name'] = $idx;
+            } elseif ($map['pot_name'] === -1 && preg_match('/(^pot$|nama\s*pot|pot_name|grup|group|kloter)/i', $norm)) {
+                $map['pot_name'] = $idx;
+            } elseif ($map['stage'] === -1 && preg_match('/(stage|tahap|babak|fase)/i', $norm)) {
+                $map['stage'] = $idx;
+            } elseif (preg_match('/(player|pemain|anggota|member|roster|nick|ign|kapten|captain|leader)/i', $norm)) {
+                $map['members'][] = $idx;
+            }
+        }
+
+        return $map;
     }
 }

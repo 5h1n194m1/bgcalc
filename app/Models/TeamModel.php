@@ -6,11 +6,11 @@ use CodeIgniter\Model;
 
 class TeamModel extends Model
 {
-    protected $table         = 'teams';
-    protected $primaryKey    = 'id';
-    protected $returnType    = 'array';
-    protected $allowedFields = ['tournament_id', 'pot_id', 'name', 'sort_order'];
+    protected $table = 'teams';
+    protected $primaryKey = 'id';
+    protected $returnType = 'array';
+    protected $allowedFields = ['tournament_id', 'pot_id', 'is_sandbox', 'name', 'sort_order'];
     protected $useTimestamps = true;
-    protected $createdField  = 'created_at';
-    protected $updatedField  = 'updated_at';
+    protected $createdField = 'created_at';
+    protected $updatedField = 'updated_at';
 }

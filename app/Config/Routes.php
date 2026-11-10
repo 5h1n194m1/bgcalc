@@ -98,6 +98,7 @@ $routes->post('index.php/scores/save', 'ScoreController::save', $adminFilters);
 |--------------------------------------------------------------------------
 */
 
+// --- Teams & Roster Hub ---
 $routes->get('teams', 'TeamController::rosterIndex', $sessionFilters);
 $routes->get('teams/roster', 'TeamController::rosterIndex', $sessionFilters);
 
@@ -126,6 +127,7 @@ $routes->post('teams/update/(:num)', 'TeamController::update/$1', $adminFilters)
 $routes->post('teams/(:num)/update', 'TeamController::update/$1', $adminFilters);
 $routes->post('teams/bulk-update', 'TeamController::bulkUpdate', $adminFilters);
 $routes->post('teams/roster/bulk-update', 'TeamController::bulkUpdate', $adminFilters);
+$routes->post('teams/bulk-action', 'TeamController::bulkAction', $adminFilters);
 
 // Delete & Detach Team
 $routes->post('teams/delete/(:num)', 'TeamController::delete/$1', $adminFilters);
@@ -139,14 +141,16 @@ $routes->post('teams/(:num)/detach', 'TeamController::detach/$1', $adminFilters)
 |--------------------------------------------------------------------------
 */
 
+// --- 1. Smart CSV & Spreadsheet Import Engine ---
+$routes->get('imports/raw-csv', 'TeamController::rawCsvView', $adminFilters);
+$routes->post('imports/raw-csv/preview', 'TeamController::previewMappedCsv', $adminFilters);
+$routes->post('imports/raw-csv/process', 'TeamController::processMappedCsv', $adminFilters);
+
+// --- 2. Standard Spreadsheet / Google Forms Import ---
 $routes->get('imports/teams', 'ImportController::teams', $adminFilters);
 $routes->post('imports/teams', 'ImportController::storeTeams', $adminFilters);
-
 $routes->get('import/teams', 'ImportController::teams', $adminFilters);
 $routes->post('import/teams', 'ImportController::storeTeams', $adminFilters);
-
-$routes->get('imports/raw-csv', 'RawCsvController::index', $adminFilters);
-$routes->post('imports/raw-csv/process', 'RawCsvController::process', $adminFilters);
 
 /*
 |--------------------------------------------------------------------------
